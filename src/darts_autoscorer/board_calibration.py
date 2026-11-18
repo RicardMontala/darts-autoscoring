@@ -19,6 +19,9 @@ class BoardCalibrator:
         self.source_points = None
         self.destination_points = None
 
+        self.board_center = (self.output_size // 2, self.output_size // 2)
+        self.board_radius = self.output_size / 2 - self.margin
+
     def calibrate(self, frame):
 
         # Select four points: top, right, bottom, left
