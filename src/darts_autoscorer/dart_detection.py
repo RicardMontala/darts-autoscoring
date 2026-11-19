@@ -7,11 +7,9 @@ class DartDetector:
     Detect changed image regions between two board frames.
     """
 
-    def __init__(self, board_center, threshold=16, min_area=400, max_shift=1, frame_patience=3, warmup_frames=30,
+    def __init__(self, threshold=16, min_area=400, max_shift=1, frame_patience=3, warmup_frames=30,
                 openKernel_size=3, closeKernel_size=7):
         """
-        board_center: tuple[int, int]
-            Coordinates of the dartboard centre in the rectified image.
         threshold: int, optional
             MOG2 threshold used to distinguish foreground from background.
         min_area: int, optional
@@ -29,8 +27,6 @@ class DartDetector:
             Size of the morphological closing kernel used to fill holes and
             connect nearby foreground regions.
         """
-
-        self.board_center = board_center
 
         self.threshold = threshold
         self.min_area = min_area
@@ -111,9 +107,6 @@ class DartDetector:
             foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_OPEN, self.open_kernel)
             foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_CLOSE, self.close_kernel)
 
-            # Remove already-captured darts from the foreground pixes 
-            self.settled_mask = cv2.bitwise_and(self.settled_mask, foreground_mask)
-
             # Contains foregorund pixes (potential darts) that are NOT in settled_mask
             new_dart_mask = cv2.bitwise_and(foreground_mask, cv2.bitwise_not(self.settled_mask)) 
 
@@ -139,7 +132,7 @@ class DartDetector:
                 if self.stable_frames >= self.frame_patience:
 
                     # Detect tip coordinates
-                    tip = self._locate_tip(new_dart_mask, curr_bbox, self.board_center)
+                    tip = self._locate_tip(new_dart_mask, curr_bbox)
 
                     # Stamp detect dart into settled_mask so next frame ignores this dart completely
                     self.settled_mask = cv2.bitwise_or(self.settled_mask, new_dart_mask)
@@ -167,18 +160,19 @@ class DartDetector:
         )
 
 
-    def _locate_tip(self, mask, bbox, board_center):
+    def _locate_tip(self, mask, bbox):
         """
-        Estimate the dart tip using PCA.
+        Estimate the dart tip using PCA and longitudinal width analysis.
+
+        The dart flight is assumed to have a larger transverse width than
+        the tip. The endpoint opposite to the wider region is selected.
 
         Parameters
         ----------
-        mask : np.ndarray
-            Binary difference mask returned by detect().
-        bbox : tuple
-            Single bounding box (x, y, width, height) returnned by detect().
-        board_center : tuple
-            Centre of the rectified dartboard.
+        mask: np.ndarray
+            Binary mask containing the detected dart.
+        bbox: tuple
+            Single bounding box (x, y, width, height) containing the detected dart.
 
         Returns
         -------
@@ -188,10 +182,10 @@ class DartDetector:
 
         x, y, w, h = bbox
 
-        # Extract the dart region.
+        # Extract the dart region
         roi = mask[y:y+h, x:x+w]
 
-        # Find the contour.
+        # Find the contour
         contours, _ = cv2.findContours(
             roi,
             cv2.RETR_EXTERNAL,
@@ -211,28 +205,48 @@ class DartDetector:
         if len(points) < 3:
             return None
 
-        # Calculate the principal axis using PCA.
+        # Calculate the principal axis using PCA
         mean, eigenvectors = cv2.PCACompute(points, mean=None)
 
-        # Project points onto the principal axis.
-        axis = eigenvectors[0] # Principal axis (where the dart tip is located)
-        projections = (points - mean) @ axis
+        center = mean[0]
+        axis = eigenvectors[0]
 
-        # Find the two extreme points.
-        point_a = points[np.argmin(projections)]
-        point_b = points[np.argmax(projections)]
+        # Perpendicular direction
+        normal = np.array([-axis[1], axis[0]])
+
+        # Project the silhouette onto both directions
+        centered = points - center
+
+        longitudinal = centered @ axis
+        transverse = centered @ normal
+
+        # Split the dart into two longitudinal halves
+        point_min = points[np.argmin(longitudinal)]
+        point_max = points[np.argmax(longitudinal)]
+        midpoint = 0.5 * (point_min + point_max)
+
+        first_half = longitudinal < midpoint [0]
+        second_half = longitudinal >= midpoint[0]
+
+        if np.count_nonzero(first_half) < 3 or np.count_nonzero(second_half) < 3:
+            return None
+
+        # Calculate transverse variance in each half
+        var_first = np.var(transverse[first_half])
+        var_second = np.var(transverse[second_half])
+
+        # Select the half with lower variance (the tip has smaller width than the flight)
+        if var_first < var_second:
+            tip_idx = np.argmin(longitudinal)
+        else:
+            tip_idx = np.argmax(longitudinal)
+
+        # Get the corresponding silhouette pixel.
+        tip = points[tip_idx]
 
         # Convert ROI coordinates to full-image coordinates.
-        point_a += np.array([x, y])
-        point_b += np.array([x, y])
-
-        # Select the endpoint closest to the board centre.
-        board_center = np.array(board_center)
-
-        dist_a = np.linalg.norm(point_a - board_center)
-        dist_b = np.linalg.norm(point_b - board_center)
-
-        tip = point_a if dist_a < dist_b else point_b
+        tip += np.array([x, y])
 
         return tuple(np.round(tip).astype(int))
+
 
